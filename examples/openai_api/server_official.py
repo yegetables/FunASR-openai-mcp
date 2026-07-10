@@ -5,15 +5,11 @@ Drop-in replacement for OpenAI's /v1/audio/transcriptions endpoint.
 Works with any agent framework that supports OpenAI audio API.
 
 Usage:
-    python funasr_server.py --device cuda --port 8221
+    python server.py --model sensevoice --device cuda --port 8000
 
 Then use with any OpenAI-compatible client:
-    curl http://localhost:8221/v1/audio/transcriptions \
+    curl http://localhost:8000/v1/audio/transcriptions \
       -F file=@audio.wav -F model=sensevoice
-
-Speaker diarization (optional):
-    curl http://localhost:8221/v1/audio/transcriptions \
-      -F file=@meeting.wav -F model=paraformer -F spk=true
 """
 
 import argparse
@@ -58,21 +54,13 @@ MODEL_CONFIGS = {
         "vad_model": "fsmn-vad",
         "vad_kwargs": {"max_single_segment_time": 30000},
     },
-    "qwen3-asr": {
-        "model": "Qwen/Qwen3-ASR-1.7B",
-        "hub": "hf",
-    },
 }
 
-# Models that support speaker diarization (cam++)
-SPK_SUPPORTED = {"sensevoice", "paraformer", "paraformer-en", "qwen3-asr"}
 
-
-def load_model(model_name: str, spk: bool = False):
-    """Load a model and store in registry. spk=True loads speaker diarization."""
-    cache_key = f"{model_name}_spk" if spk else model_name
-    if cache_key in MODEL_REGISTRY:
-        return MODEL_REGISTRY[cache_key]
+def load_model(model_name: str):
+    """Load a model and store in registry."""
+    if model_name in MODEL_REGISTRY:
+        return MODEL_REGISTRY[model_name]
 
     if model_name not in MODEL_CONFIGS:
         available = list(MODEL_CONFIGS.keys())
@@ -84,17 +72,13 @@ def load_model(model_name: str, spk: bool = False):
     cfg["device"] = DEVICE
     cfg["disable_update"] = True
 
-    if spk and model_name in SPK_SUPPORTED:
-        cfg["spk_model"] = "cam++"
-
-    label = f"{model_name} (+spk)" if spk else model_name
-    logger.info(f"Loading model '{label}' on {DEVICE}...")
+    logger.info(f"Loading model '{model_name}' on {DEVICE}...")
     t0 = time.time()
     model = AutoModel(**cfg)
     elapsed = time.time() - t0
-    logger.info(f"Model '{label}' loaded in {elapsed:.1f}s")
+    logger.info(f"Model '{model_name}' loaded in {elapsed:.1f}s")
 
-    MODEL_REGISTRY[cache_key] = model
+    MODEL_REGISTRY[model_name] = model
     return model
 
 
@@ -109,17 +93,15 @@ async def transcribe(
     model: str = Form(default="sensevoice"),
     language: Optional[str] = Form(default=None),
     response_format: Optional[str] = Form(default="json"),
-    spk: bool = Form(default=False),
 ):
     """
     OpenAI-compatible audio transcription endpoint.
-
+    
     Accepts the same parameters as OpenAI's /v1/audio/transcriptions:
     - file: Audio file (wav, mp3, flac, m4a, ogg, webm)
-    - model: Model to use (sensevoice, paraformer, paraformer-en, fun-asr-nano)
+    - model: Model to use (sensevoice, paraformer, fun-asr-nano)
     - language: Optional language hint
     - response_format: json or verbose_json
-    - spk: Enable speaker diarization (default: false)
     """
     # Validate model
     if model not in MODEL_CONFIGS:
@@ -136,7 +118,7 @@ async def transcribe(
         tmp_path = tmp.name
 
     try:
-        asr_model = load_model(model, spk=spk)
+        asr_model = load_model(model)
         t0 = time.time()
 
         generate_kwargs = {"input": tmp_path, "batch_size": 1}
@@ -206,21 +188,18 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
     parser.add_argument("--device", default="cuda", help="Device: cuda, cpu, mps")
-    parser.add_argument("--model", default=None, help="Pre-load model at startup (omit for on-demand loading)")
+    parser.add_argument("--model", default="sensevoice", help="Pre-load model at startup")
     args = parser.parse_args()
 
     global DEVICE
     DEVICE = args.device
 
-    # Pre-load model if specified
-    if args.model:
-        load_model(args.model)
+    # Pre-load default model
+    load_model(args.model)
 
     logger.info(f"FunASR API server starting on http://{args.host}:{args.port}")
     logger.info(f"  Device: {DEVICE}")
-    loaded = list(MODEL_REGISTRY.keys()) or ["(none — will load on first request)"]
-    logger.info(f"  Models available: {list(MODEL_CONFIGS.keys())}")
-    logger.info(f"  Models loaded:    {loaded}")
+    logger.info(f"  Models: {list(MODEL_CONFIGS.keys())}")
     logger.info(f"  Docs:   http://{args.host}:{args.port}/docs")
     uvicorn.run(app, host=args.host, port=args.port)
 
